@@ -27,11 +27,12 @@ LogAura UnitCraft introduces a fully automated, AI-driven testing workflow that 
 
 When a developer pushes code to a feature branch:
 
-1. Unit tests are **automatically generated** using AI.
+1. Unit tests are **automatically generated** using Cline CLI (with OpenAI gpt-5-mini).
 2. Tests are executed and **coverage is calculated**.
 3. A **coverage gate** enforces quality standards.
 4. A new branch and **pull request are created automatically**.
 5. The PR is **reviewed by an AI reviewer** that summarizes changes and highlights issues.
+6. Entire flow is orchestrated by Kestra.
 
 All of this happens without the developer needing to write or review a single test manually.
 
