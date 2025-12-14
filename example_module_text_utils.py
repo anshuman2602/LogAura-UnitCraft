@@ -58,6 +58,3 @@ def word_count(text: str) -> int:
         return 0
 
     return len(text.split(" "))
-
-
-
