@@ -64,6 +64,65 @@ This creates a seamless, end-to-end automated testing experience.
 
 ---
 
+
+### Setup Instructions
+
+LogAura UnitCraft can be set up using the following steps:
+
+1. **Prerequisites**
+   - Python 3.9 or higher
+   - Git
+   - Docker (for running Kestra) (Refer https://kestra.io/docs/getting-started/quickstart#start-kestra for installation)
+   - A GitHub repository with push access
+   - A GitHub Personal Access Token
+   - Cline CLI installed locally
+        ```bash
+        npm install -g cline
+        ```
+   - CodeRabbit installed on the target GitHub repository
+
+2. **Environment Configuration**
+   - Configure environment variables for:
+     - GitHub authentication (`GITHUB_TOKEN`)
+     - OpenAI API access
+     - SMTP credentials for email notifications
+   - Secrets are managed via environment variables or Kestra secrets.
+
+3. **Run the Test Generation Service**
+   - Set environment variable
+        ```bash
+        export GITHUB_TOKEN=xxx
+        ```
+   - Start the Flask-based service that wraps Cline CLI.
+        ```bash
+        pip install -r cline_cli_wrapper/requirements.txt
+        ```
+        ```bash
+        python cline_cli_wrapper/cline_test_server.py
+        ```
+   - This service listens for requests from Kestra and executes test generation, coverage checks, and GitHub automation.
+
+4. **Deploy the Kestra Workflow**
+   - Start the Kestra instance
+   - Upload the kestra_flow to Kestra.
+   - Configure OPENAI_API_KEY and SMTP credentials.
+   - Configure a GitHub webhook trigger for push events in your repository.
+     - Install ngrok (Refer https://download.ngrok.com/)
+     - Run `ngrok http 8080`
+     - Get the url displayed and use it for the github hook. (Sample url: https://YourNgrokLinkDisplayed/api/v1/executions/webhook/ai.testing/cline_test_generation_webhook/github-push)
+   - Set the desired coverage threshold and notification settings.
+
+5. **Enable CodeRabbit**
+   - Install CodeRabbit on the repository.
+   - Ensure it is enabled for pull request reviews and summaries.
+
+Once configured, the system runs automatically on every push to a feature branch.
+
+---
+
+### Usage
+- Once the setup is done, the flow would automatically be triggered on `git push` on your desired branch.
+
 ### Why This Is Impactful
 
 LogAura UnitCraft transforms testing from a manual, error-prone process into an invisible safety net:
@@ -113,4 +172,4 @@ Our vision is to make testing effortless and universal. In the future, LogAura U
 
 ---
 
-**LogAura UnitCraft: Push code. Tests appear. Coverage enforced. PR reviewed. Automatically.**
+> **LogAura UnitCraft: Push code. Tests appear. Coverage enforced. PR reviewed. Automatically.**
