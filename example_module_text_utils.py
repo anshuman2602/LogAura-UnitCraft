@@ -124,3 +124,4 @@ def batch_normalize(texts: Iterable[str]) -> List[str]:
         raise TypeError("texts cannot be None")
 
     return [normalize_whitespace(t) for t in texts]
+
