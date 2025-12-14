@@ -1,0 +1,347 @@
+import os
+import json
+import subprocess
+import re
+from pathlib import Path
+from flask import Flask, request, jsonify
+import tempfile
+import shutil
+import uuid
+from threading import Thread
+
+app = Flask(__name__)
+
+JOBS = {}
+
+# --------------------------------------------------
+# PROMPT
+# --------------------------------------------------
+
+def build_prompt(target: str):
+    return f"""
+You are an expert Python test engineer.
+
+TASK:
+- Generate pytest unit tests for the Python code directly at: {target}
+- Do not create a tests directory
+
+RULES:
+- Write tests directly to disk.
+- Use pytest only.
+- Every test MUST have exactly one marker:
+  - @pytest.mark.positive for valid/happy-path tests
+  - @pytest.mark.negative for invalid/error/edge-case tests
+- Aim for maximum line and branch coverage.
+- Do not explain. Do not summarize. Only generate code.
+- Proceed without asking for confirmation.
+
+NAMING:
+- Test files must be named test_*.py
+"""
+
+# --------------------------------------------------
+# CLONE / RUN CLINE WITH STREAMING
+# --------------------------------------------------
+
+def run_cline(prompt: str, cwd: str):
+    print("\n🚀 Starting Cline...\n")
+
+    process = subprocess.Popen(
+        ["cline", prompt, "-y"],
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
+
+    output = []
+    for line in process.stdout:
+        print(line, end="")
+        output.append(line)
+
+    process.wait()
+
+    return {
+        "exit_code": process.returncode,
+        "stdout": "".join(output)
+    }
+
+# --------------------------------------------------
+# TEST FILE SCAN + MARKER COUNTS
+# --------------------------------------------------
+
+def find_test_files(repo_path):
+    return [
+        str(p)
+        for p in Path(repo_path).rglob("test_*.py")
+    ]
+
+def count_tests_by_marker(test_files):
+    positive = 0
+    negative = 0
+
+    for file in test_files:
+        with open(file, "r", encoding="utf-8") as f:
+            content = f.read()
+            positive += len(re.findall(r"@pytest\.mark\.positive", content))
+            negative += len(re.findall(r"@pytest\.mark\.negative", content))
+
+    return {
+        "total": positive + negative,
+        "positive": positive,
+        "negative": negative
+    }
+
+# --------------------------------------------------
+# RUN PYTEST WITH COVERAGE
+# --------------------------------------------------
+
+def run_tests_with_coverage(repo_path):
+    print("\n🧪 Running pytest with coverage...\n")
+
+    cmd = [
+        "pytest",
+        "--cov=.",
+        "--cov-report=json:coverage.json",
+        "--cov-report=term"
+    ]
+
+    process = subprocess.Popen(
+        cmd,
+        cwd=repo_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
+
+    output = []
+    for line in process.stdout:
+        print(line, end="")
+        output.append(line)
+
+    process.wait()
+
+    return {
+        "exit_code": process.returncode,
+        "stdout": "".join(output)
+    }
+
+# --------------------------------------------------
+# READ COVERAGE JSON
+# --------------------------------------------------
+
+def with_github_auth(repo_url: str) -> str:
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise RuntimeError("GITHUB_TOKEN is not set")
+
+    # https://github.com/org/repo.git
+    # → https://x-access-token:TOKEN@github.com/org/repo.git
+    return repo_url.replace(
+        "https://",
+        f"https://x-access-token:{token}@"
+    )
+
+def read_coverage(repo_path):
+    cov_file = Path(repo_path) / "coverage.json"
+    if not cov_file.exists():
+        return None
+
+    with open(cov_file) as f:
+        data = json.load(f)
+
+    totals = data.get("totals", {})
+    return {
+        "line_coverage_percent": round(totals.get("percent_covered", 0), 2),
+        "lines_covered": totals.get("covered_lines", 0),
+        "lines_total": totals.get("num_statements", 0)
+    }
+
+def clone_repo(repo_url: str, ref: str) -> str:
+    tmp_dir = tempfile.mkdtemp(prefix="cline_repo_")
+
+    try:
+        # subprocess.check_call(["git", "clone", repo_url, tmp_dir])
+        auth_repo_url = with_github_auth(repo_url)
+        print(auth_repo_url)
+        subprocess.check_call(["git", "clone", auth_repo_url, tmp_dir])
+        if ref:
+            subprocess.check_call(["git", "checkout", 'feature'], cwd=tmp_dir)
+        return tmp_dir
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+
+def create_test_branch(repo_path, job_id):
+    branch = f"cline-tests-{job_id[:8]}"
+    subprocess.check_call(["git", "checkout", "-b", branch], cwd=repo_path)
+    return branch
+
+def commit_tests(repo_path):
+    print("indside commit_tes")
+    print(repo_path)
+    subprocess.check_call(["git", "add", "."], cwd=repo_path)
+    subprocess.check_call(
+        ["git", "commit", "-m", "Add autogenerated unit tests"],
+        cwd=repo_path
+    )
+
+def push_branch(repo_path, branch):
+    subprocess.check_call(
+        ["git", "push", "-u", "origin", branch],
+        cwd=repo_path
+    )
+
+def create_pr(repo_url, branch, base="feature"):
+    api_url = repo_url.replace(
+        "https://github.com/",
+        "https://api.github.com/repos/"
+    )
+
+    if api_url.endswith(".git"):
+        api_url = api_url[:-4]
+    
+
+
+    print("API URL:")
+    print(api_url)
+
+    token = os.environ["GITHUB_TOKEN"]
+
+    payload = {
+        "title": "Add autogenerated unit tests",
+        "head": branch,
+        "base": base,
+        "body": "Tests generated automatically by Cline."
+    }
+
+    subprocess.check_call([
+        "curl", "-X", "POST",
+        "-H", f"Authorization: Bearer {token}",
+        "-H", "Accept: application/vnd.github+json",
+        f"{api_url}/pulls",
+        "-d", json.dumps(payload)
+    ])
+
+def run_job(job_id, repo_url, ref, payload):
+    try:
+        target = payload.get("target", ".")
+        max_attempts = payload.get("max_attempts", 1)
+
+        repo_path = clone_repo(repo_url, ref)
+        print(repo_path)
+
+        for attempt in range(1, max_attempts + 1):
+            prompt = build_prompt(target)
+            cline_result = run_cline(prompt, repo_path)
+
+            if cline_result["exit_code"] != 0:
+                continue
+
+            test_files = find_test_files(repo_path)
+            if not test_files:
+                continue
+
+            test_counts = count_tests_by_marker(test_files)
+            run_tests_with_coverage(repo_path)
+            coverage = read_coverage(repo_path)
+            coverage_pct = coverage["line_coverage_percent"]
+
+            if coverage_pct < 80:
+                JOBS[job_id] = {
+                    "status": "failed",
+                    "reason": "coverage_below_threshold",
+                    "metrics": {
+                        "tests": test_counts,
+                        "coverage": coverage
+                    }
+                }
+                return
+            else:
+                branch = create_test_branch(repo_path, job_id)
+                if Path(repo_path).rglob("test_*.py"): # Simple existence check
+                    try:
+                        # push_branch(repo_path, branch)
+                        commit_tests(repo_path)
+                        push_branch(repo_path, branch)
+                        create_pr(repo_url, branch)
+                        JOBS[job_id] = {
+                            "status": "success",
+                            "branch": branch,
+                            "pr_created": True,
+                            "metrics": {
+                                "tests": test_counts,
+                                "coverage": coverage
+                            }
+                        }
+                        return
+                    except subprocess.CalledProcessError as sub_e:
+                        # Git failure: Report the error but still include metrics if available
+                        JOBS[job_id] = {
+                            "status": "failed",
+                            "error": f"Git operation failed: {sub_e}",
+                            "metrics": {
+                                "tests": test_counts,
+                                "coverage": coverage
+                            } if test_counts and coverage else None
+                        }
+                        return
+                else:
+                    JOBS[job_id] = {"status": "failed", "reason": "no_tests_to_commit"}
+                    return
+
+        JOBS[job_id] = {"status": "failed"}
+
+    except Exception as e:
+        JOBS[job_id] = {
+            "status": "failed",
+            "error": str(e)
+        }
+    finally:
+        # Clean up the temporary directory
+        if 'repo_path' in locals() and os.path.exists(repo_path):
+            shutil.rmtree(repo_path, ignore_errors=True)
+
+
+@app.route("/generate-tests", methods=["POST"])
+def generate_tests():
+    payload = request.json or {}
+
+    repo_url = payload.get("repo_url")
+    ref = payload.get("ref")
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    job_id = str(uuid.uuid4())
+    # job_id = "a"
+
+    JOBS[job_id] = {"status": "running"}
+
+    Thread(
+        target=run_job,
+        args=(job_id, repo_url, ref, payload),
+        daemon=True
+    ).start()
+
+    return jsonify({
+        "job_id": job_id,
+        "status": "started"
+    }), 202
+
+
+@app.route("/status/<job_id>", methods=["GET"])
+def job_status(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(job)
+
+# --------------------------------------------------
+# MAIN
+# --------------------------------------------------
+
+if __name__ == "__main__":
+    print("🧪 Cline Test Generator running on http://localhost:5002")
+    app.run(port=5002, debug=False)

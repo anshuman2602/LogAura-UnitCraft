@@ -1,0 +1,115 @@
+id: cline_test_generation_webhook
+namespace: ai.testing
+
+description: >
+  Triggered by GitHub push webhook.
+  Calls Cline test-generation service and enforces coverage.
+
+
+# GITHUB WEBHOOK TRIGGER
+triggers:
+  - id: github_push_event
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: github-push
+
+
+tasks:
+
+  # LOG WEBHOOK PAYLOAD
+  - id: log_webhook_payload
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      GitHub Event Received
+      Repository: {{ trigger.body.repository.full_name }}
+      Branch: {{ trigger.body.ref }}
+
+
+  # BRANCH GATE
+  - id: check_branch
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ trigger.body.ref == 'refs/heads/feature' }}"
+    then:
+      - id: when_true
+        type: io.kestra.plugin.core.log.Log
+        message: "Push detected to main branch"
+    else:
+      - id: when_false
+        type: io.kestra.plugin.core.execution.Exit
+        state: SUCCESS
+
+
+  # GENERATE TESTS
+  - id: start_test_generation
+    type: io.kestra.plugin.core.http.Request
+    method: POST
+    uri: http://host.docker.internal:5002/generate-tests
+    contentType: application/json
+    body: |
+      {
+        "repo_url": "{{ trigger.body.repository.clone_url }}",
+        "ref": "{{ trigger.body.ref }}",
+        "target": ".",
+        "max_attempts": 1
+      }
+
+
+  # POLL STATUS UNTIL COMPLETED  
+  - id: poll_until_done
+    type: io.kestra.plugin.core.flow.LoopUntil
+
+    condition: "{{ fromJson(outputs.check_status.body).status != 'running' }}"
+
+    tasks:
+      - id: check_status
+        type: io.kestra.plugin.core.http.Request
+        uri: "http://host.docker.internal:5002/status/{{ fromJson(outputs.start_test_generation.body).job_id }}"
+        method: GET
+
+      - id: sleep
+        type: io.kestra.plugin.core.flow.Sleep
+        duration: PT30S
+
+
+  # COVERAGE CHECK
+  - id: coverage_gate
+    type: io.kestra.plugin.core.flow.Switch
+    value: "{{ fromJson(outputs.check_status.body).metrics.coverage.line_coverage_percent >= 80 }}"
+    cases:
+      true:
+        - id: success_log
+          type: io.kestra.plugin.core.log.Log
+          message: "✅ Tests committed and PR created"
+
+      false:
+        - id: low_coverage
+          type: io.kestra.plugin.core.log.Log
+          message: "❌ Coverage below 80%, PR not created"
+
+
+  # SUMMARIZE TEST RESULTS USING OPENAI AGENT
+  - id: ai_summary
+    type: io.kestra.plugin.openai.ChatCompletion
+    apiKey: "API_KEY"
+    model: gpt-4o
+    prompt: "Summarize and create a report of the following unit test results data. The data was automatically generated through automated tests Using Kestra workflows. {{ fromJson(outputs.check_status.body) }}. Generate HTML text only."
+
+
+  # LOG SUMMARY
+  - id: log_summary
+    type: io.kestra.plugin.core.log.Log
+    message: "{{ outputs.ai_summary.choices[0].message.content }}"
+
+
+  # SEND TEST SUMMARY TO ADMIN
+  - id: send_report_email
+    type: io.kestra.plugin.notifications.mail.MailSend
+    from: anshumanpurohit02@gmail.com
+    to: anshumanpurohit02@gmail.com
+    subject: "Kestra Workflow Alert"
+    htmlTextContent: "{{ outputs.ai_summary.choices[0].message.content }}"
+    # SMTP Credentials (use secrets for production!)
+    host: smtp.gmail.com
+    port: 465 # or 587
+    username: "email"
+    password: "password"
+
